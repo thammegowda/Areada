@@ -81,6 +81,9 @@ internal fun ReaderSettingsSheet(
     var lineSpacingDraft by rememberSaveable {
         mutableFloatStateOf(preferences.lineSpacing)
     }
+    var ttsSpeechRateDraft by rememberSaveable {
+        mutableFloatStateOf(preferences.ttsSpeechRate)
+    }
     var rulerPositionDraft by rememberSaveable {
         mutableFloatStateOf(preferences.readingRulerPosition)
     }
@@ -94,6 +97,9 @@ internal fun ReaderSettingsSheet(
     }
     LaunchedEffect(preferences.lineSpacing) {
         lineSpacingDraft = preferences.lineSpacing
+    }
+    LaunchedEffect(preferences.ttsSpeechRate) {
+        ttsSpeechRateDraft = preferences.ttsSpeechRate
     }
     LaunchedEffect(preferences.readingRulerPosition) {
         rulerPositionDraft = preferences.readingRulerPosition
@@ -121,6 +127,11 @@ internal fun ReaderSettingsSheet(
             }
             if (finalLineSpacing != preferences.lineSpacing) {
                 updated = updated.copy(lineSpacing = finalLineSpacing)
+                needsCommit = true
+            }
+            val finalTtsSpeechRate = ttsSpeechRateDraft.coerceIn(0.5f, 2f)
+            if (finalTtsSpeechRate != preferences.ttsSpeechRate) {
+                updated = updated.copy(ttsSpeechRate = finalTtsSpeechRate)
                 needsCommit = true
             }
             if (finalRulerPos != preferences.readingRulerPosition) {
@@ -229,6 +240,20 @@ internal fun ReaderSettingsSheet(
                     },
                     valueRange = 1.2f..2.4f,
                     steps = 11,
+                )
+                SettingsControlSpacer()
+                SettingsSlider(
+                    label = stringResource(R.string.speech_rate),
+                    valueLabel = "${(ttsSpeechRateDraft * 100f).roundToInt() / 100f}×",
+                    value = ttsSpeechRateDraft,
+                    onValueChange = { value -> ttsSpeechRateDraft = value },
+                    onValueChangeFinished = {
+                        onPreferencesChange(
+                            preferences.copy(ttsSpeechRate = ttsSpeechRateDraft.coerceIn(0.5f, 2f)),
+                        )
+                    },
+                    valueRange = 0.5f..2f,
+                    steps = 5,
                 )
                 SettingsControlSpacer()
                 SettingsSection(title = stringResource(R.string.page_navigation)) {

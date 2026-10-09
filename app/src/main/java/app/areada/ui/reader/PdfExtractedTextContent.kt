@@ -39,6 +39,9 @@ internal fun PdfExtractedTextContent(
     searchBackwards: Boolean = false,
     onSearchResult: (current: Int, count: Int) -> Unit = { _, _ -> },
     navigationMode: ReaderNavigationMode = ReaderNavigationMode.SWIPE,
+    onReadableTextChange: (String) -> Unit = {},
+    ttsHighlightStart: Int = -1,
+    ttsHighlightEnd: Int = -1,
 ) {
     val html = remember(text, paragraphs, preferences.themeMode, preferences.fontChoice, preferences.fontSizeSp, preferences.lineSpacing, renderPalette) {
         buildPdfExtractedHtml(text, paragraphs, preferences, renderPalette)
@@ -72,6 +75,9 @@ internal fun PdfExtractedTextContent(
         searchRequest = searchRequest,
         searchBackwards = searchBackwards,
         onSearchResult = onSearchResult,
+        onReadableTextChange = onReadableTextChange,
+        ttsHighlightStart = ttsHighlightStart,
+        ttsHighlightEnd = ttsHighlightEnd,
     )
 }
 

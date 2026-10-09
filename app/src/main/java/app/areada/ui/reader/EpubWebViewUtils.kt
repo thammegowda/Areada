@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import app.areada.R
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
@@ -172,8 +173,192 @@ internal fun decodeJavascriptString(value: String?): String {
     if (value.isNullOrBlank() || value == "null") {
         return ""
     }
-
     return runCatching {
         JSONArray("[$value]").optString(0)
     }.getOrDefault("")
+}
+
+internal fun installEpubTtsTextIndex(
+    webView: WebView,
+    highlightColor: String,
+    onReadableText: (String) -> Unit,
+) {
+    val quotedColor = JSONObject.quote(highlightColor)
+    webView.evaluateJavascript(
+        """
+            (function() {
+              var blockTags = {
+                ADDRESS: true, ARTICLE: true, ASIDE: true, BLOCKQUOTE: true,
+                DD: true, DIV: true, DL: true, DT: true, FIGCAPTION: true,
+                FIGURE: true, FOOTER: true, H1: true, H2: true, H3: true,
+                H4: true, H5: true, H6: true, HEADER: true, HR: true,
+                LI: true, MAIN: true, NAV: true, OL: true, P: true,
+                PRE: true, SECTION: true, TABLE: true, TD: true, TH: true,
+                TR: true, UL: true
+              };
+
+              function isExcluded(element) {
+                var current = element;
+                while (current && current !== document.body) {
+                  var tag = current.tagName;
+                  if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'SVG') {
+                    return true;
+                  }
+                  if (current.getAttribute && (
+                      current.getAttribute('aria-hidden') === 'true' ||
+                      current.hasAttribute('data-areada-ignore-tts')
+                  )) {
+                    return true;
+                  }
+                  current = current.parentElement;
+                }
+                if (element && window.getComputedStyle) {
+                  var style = window.getComputedStyle(element);
+                  return style.display === 'none' || style.visibility === 'hidden';
+                }
+                return false;
+              }
+
+              function blockAncestor(element) {
+                var current = element;
+                while (current && current !== document.body) {
+                  if (blockTags[current.tagName]) return current;
+                  current = current.parentElement;
+                }
+                return document.body;
+              }
+
+              window.__areadaBuildTtsIndex = function() {
+                if (window.__areadaTtsIndex) return window.__areadaTtsIndex;
+
+                var output = [];
+                var points = [];
+                var pendingSpace = false;
+                var lastBlock = null;
+                var walker = document.createTreeWalker(
+                  document.body,
+                  NodeFilter.SHOW_TEXT
+                );
+                var node;
+                while ((node = walker.nextNode())) {
+                  var parent = node.parentElement;
+                  if (!parent || isExcluded(parent)) continue;
+
+                  var block = blockAncestor(parent);
+                  if (output.length && block !== lastBlock) pendingSpace = true;
+
+                  var raw = node.nodeValue || '';
+                  for (var i = 0; i < raw.length; i++) {
+                    var character = raw.charAt(i);
+                    if (/\s/.test(character)) {
+                      pendingSpace = true;
+                      continue;
+                    }
+                    if (pendingSpace && output.length) {
+                      output.push(' ');
+                      points.push({ node: node, offset: i });
+                    }
+                    output.push(character);
+                    points.push({ node: node, offset: i });
+                    pendingSpace = false;
+                  }
+                  lastBlock = block;
+                }
+
+                window.__areadaTtsIndex = {
+                  text: output.join(''),
+                  points: points
+                };
+                return window.__areadaTtsIndex;
+              };
+
+              window.__areadaClearTtsHighlight = function() {
+                if (window.CSS && CSS.highlights) {
+                  CSS.highlights.delete('areada-tts');
+                }
+                var selection = window.getSelection && window.getSelection();
+                if (selection) selection.removeAllRanges();
+              };
+
+              window.__areadaHighlightTtsRange = function(start, end) {
+                var index = window.__areadaBuildTtsIndex();
+                window.__areadaClearTtsHighlight();
+                if (!index.points.length || start < 0 || end <= start || end > index.points.length) {
+                  return false;
+                }
+
+                var first = index.points[start];
+                var last = index.points[end - 1];
+                var range = document.createRange();
+                range.setStart(first.node, first.offset);
+                range.setEnd(last.node, last.offset + 1);
+
+                if (window.CSS && CSS.highlights && window.Highlight) {
+                  CSS.highlights.set('areada-tts', new Highlight(range));
+                } else {
+                  var selection = window.getSelection();
+                  selection.removeAllRanges();
+                  selection.addRange(range);
+                }
+
+                var rect = range.getBoundingClientRect();
+                var upperGuard = Math.max(92, window.innerHeight * 0.18);
+                var lowerGuard = window.innerHeight - Math.max(132, window.innerHeight * 0.22);
+                if (rect.top < upperGuard || rect.bottom > lowerGuard) {
+                  window.scrollTo({
+                    top: Math.max(0, window.scrollY + rect.top - window.innerHeight * 0.34),
+                    behavior: 'smooth'
+                  });
+                }
+                return true;
+              };
+
+              var style = document.getElementById('areada-tts-highlight-style');
+              if (!style) {
+                style = document.createElement('style');
+                style.id = 'areada-tts-highlight-style';
+                document.head.appendChild(style);
+              }
+              var color = $quotedColor;
+              style.textContent =
+                '::highlight(areada-tts) { background-color: ' + color + '; color: inherit; }' +
+                '::selection { background-color: ' + color + '; color: inherit; }';
+
+              return window.__areadaBuildTtsIndex().text;
+            })();
+        """.trimIndent(),
+    ) { result ->
+        onReadableText(decodeJavascriptString(result))
+    }
+}
+
+internal fun applyEpubTtsHighlight(
+    webView: WebView,
+    start: Int,
+    end: Int,
+) {
+    val highlightKey = "$start:$end"
+    if (webView.getTag(R.id.tag_epub_tts_highlight) == highlightKey) {
+        return
+    }
+    webView.setTag(R.id.tag_epub_tts_highlight, highlightKey)
+
+    val script = if (start >= 0 && end > start) {
+        """
+            (function() {
+              return window.__areadaHighlightTtsRange
+                ? window.__areadaHighlightTtsRange($start, $end)
+                : false;
+            })();
+        """.trimIndent()
+    } else {
+        """
+            (function() {
+              if (window.__areadaClearTtsHighlight) {
+                window.__areadaClearTtsHighlight();
+              }
+            })();
+        """.trimIndent()
+    }
+    webView.evaluateJavascript(script, null)
 }

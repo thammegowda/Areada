@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -245,7 +246,21 @@ internal fun PdfReaderScreen(
     var extractedTextSearchBackwards by rememberSaveable(screen.document.uriString) {
         mutableStateOf(false)
     }
+    val ttsController = rememberAndroidTtsController(screen.document.uriString)
+    val ttsState by ttsController.state.collectAsState()
+    var ttsAutoPlayNextSection by remember(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var handledTtsCompletion by remember(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var ttsText by remember(screen.document.uriString, sectionIndex) {
+        mutableStateOf("")
+    }
     val extractedTextSupported = remember { isPdfExtractedTextSupported() }
+    val currentExtractedText = if (sections.isNotEmpty()) sectionText else extractedText
+    val currentExtractedParagraphs =
+        if (sections.isNotEmpty()) sectionStructuredParagraphs else extractedStructuredParagraphs
     val currentBookmarked = bookmarks.any { it.id == pdfBookmarkId(screen.document.uriString, pageIndex) }
     val currentExtractedTextBookmarked = if (sections.isNotEmpty()) {
         bookmarks.any { it.id == pdfExtractedTextBookmarkId(screen.document.uriString, sectionIndex, extractedScrollFraction) }
@@ -315,10 +330,53 @@ internal fun PdfReaderScreen(
 
     fun switchToSection(nextIndex: Int) {
         if (nextIndex !in sections.indices || nextIndex == sectionIndex) return
+        if (ttsState.isPlaying) {
+            ttsController.pause()
+        }
         sectionIndex = nextIndex
         sectionText = null
         extractedPageIndex = 0
         extractedScrollFraction = 0f
+    }
+
+    LaunchedEffect(preferences.languageMode, preferences.ttsSpeechRate) {
+        ttsController.configure(
+            nextLocale = preferences.languageMode.toSpeechLocale(),
+            nextSpeechRate = preferences.ttsSpeechRate,
+        )
+    }
+
+    LaunchedEffect(isExtractedTextMode, sectionIndex, ttsText) {
+        if (!isExtractedTextMode) {
+            ttsController.dismiss()
+            return@LaunchedEffect
+        }
+        if (ttsText.isBlank()) {
+            return@LaunchedEffect
+        }
+        val autoPlay = ttsAutoPlayNextSection
+        ttsAutoPlayNextSection = false
+        ttsController.setContent(
+            contentKey = if (sections.isNotEmpty()) {
+                "${screen.document.uriString}#section-$sectionIndex"
+            } else {
+                "${screen.document.uriString}#extracted"
+            },
+            text = ttsText,
+            startFraction = if (autoPlay) 0f else extractedScrollFraction,
+            autoPlay = autoPlay,
+        )
+    }
+
+    LaunchedEffect(ttsState.completionCount) {
+        if (ttsState.completionCount <= handledTtsCompletion) {
+            return@LaunchedEffect
+        }
+        handledTtsCompletion = ttsState.completionCount
+        if (isExtractedTextMode && sections.isNotEmpty() && sectionIndex < sections.lastIndex) {
+            ttsAutoPlayNextSection = true
+            switchToSection(sectionIndex + 1)
+        }
     }
 
     fun goToPreviousSection() {
@@ -413,13 +471,12 @@ internal fun PdfReaderScreen(
     }
 
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
+    ReaderTtsErrorEffect(ttsState.error)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
     ) { _ ->
         Box(modifier = Modifier.fillMaxSize()) {
-            val currentExtractedText = if (sections.isNotEmpty()) sectionText else extractedText
-            val currentExtractedParagraphs = if (sections.isNotEmpty()) sectionStructuredParagraphs else extractedStructuredParagraphs
             if (isExtractedTextMode && currentExtractedText != null) {
                 key(screen.document.uriString, sectionIndex) {
                     PdfExtractedTextContent(
@@ -452,6 +509,13 @@ internal fun PdfReaderScreen(
                             extractedTextSearchCount = count
                         },
                         navigationMode = preferences.navigationMode,
+                        onReadableTextChange = { text ->
+                            if (text != ttsText) {
+                                ttsText = text
+                            }
+                        },
+                        ttsHighlightStart = if (ttsState.sessionActive) ttsState.sentenceStart else -1,
+                        ttsHighlightEnd = if (ttsState.sessionActive) ttsState.sentenceEnd else -1,
                     )
                 }
                 if (showReaderChrome) {
@@ -462,6 +526,15 @@ internal fun PdfReaderScreen(
                     } else {
                         stringResource(R.string.extract_text)
                     }
+                    val readerSubtitle = if (ttsState.sessionActive && ttsState.sentenceCount > 0) {
+                        stringResource(
+                            R.string.tts_sentence_progress,
+                            ttsState.sentenceIndex + 1,
+                            ttsState.sentenceCount,
+                        )
+                    } else {
+                        extractedSubtitle
+                    }
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
@@ -469,7 +542,7 @@ internal fun PdfReaderScreen(
                     ) {
                         ReaderTopBar(
                             title = screen.document.title,
-                            subtitle = extractedSubtitle,
+                            subtitle = readerSubtitle,
                             onBack = onBack,
                             onSettings = { showSettings = true },
                             onTableOfContents = if (sections.isNotEmpty()) {
@@ -482,6 +555,17 @@ internal fun PdfReaderScreen(
                             },
                             isBookmarked = currentExtractedTextBookmarked,
                             onSearch = { showExtractedTextSearch = !showExtractedTextSearch },
+                            onReadAloud = {
+                                ttsController.togglePlayback(extractedScrollFraction)
+                            },
+                            readAloudActive = ttsState.sessionActive,
+                            readAloudPlaying = ttsState.isPlaying,
+                            readAloudCanPlay = ttsState.canPlay,
+                            readAloudPreviousEnabled = ttsState.sentenceIndex > 0,
+                            readAloudNextEnabled = ttsState.sentenceIndex < ttsState.sentenceCount - 1,
+                            onReadAloudPrevious = ttsController::previousSentence,
+                            onReadAloudNext = ttsController::nextSentence,
+                            onReadAloudStop = ttsController::dismiss,
                         )
                     }
                     Box(

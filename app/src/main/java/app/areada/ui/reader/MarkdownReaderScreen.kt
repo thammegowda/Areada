@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,6 +73,11 @@ internal fun MarkdownReaderScreen(
     }
     var renderedChapter by remember(screen.document.uriString) { mutableStateOf<RenderedChapter?>(null) }
     var chapterError by remember(screen.document.uriString) { mutableStateOf<String?>(null) }
+    val ttsController = rememberAndroidTtsController(screen.document.uriString)
+    val ttsState by ttsController.state.collectAsState()
+    var ttsText by remember(screen.document.uriString) {
+        mutableStateOf("")
+    }
     var showChapterSearch by rememberSaveable(screen.document.uriString) { mutableStateOf(false) }
     var chapterSearchQuery by rememberSaveable(screen.document.uriString) { mutableStateOf("") }
     var chapterSearchCurrent by rememberSaveable(screen.document.uriString) { mutableIntStateOf(0) }
@@ -83,6 +89,23 @@ internal fun MarkdownReaderScreen(
     val latestScrollFraction by remember { mutableFloatStateOf(scrollFraction) }
     val currentBookmarkId = epubBookmarkId(screen.document.uriString, 0, scrollFraction)
     val currentBookmarked = bookmarks.any { it.id == currentBookmarkId }
+
+    LaunchedEffect(preferences.languageMode, preferences.ttsSpeechRate) {
+        ttsController.configure(
+            nextLocale = preferences.languageMode.toSpeechLocale(),
+            nextSpeechRate = preferences.ttsSpeechRate,
+        )
+    }
+
+    LaunchedEffect(ttsText) {
+        if (ttsText.isNotBlank()) {
+            ttsController.setContent(
+                contentKey = screen.document.uriString,
+                text = ttsText,
+                startFraction = scrollFraction,
+            )
+        }
+    }
 
     DisposableEffect(screen.document.uriString) {
         onDispose {
@@ -132,6 +155,16 @@ internal fun MarkdownReaderScreen(
     LaunchedEffect(isImmersiveMode) { immersiveControlsVisible = false }
     val showReaderChrome = !isImmersiveMode || immersiveControlsVisible
     ReaderStatusBarHidden(hidden = !showReaderChrome)
+    ReaderTtsErrorEffect(ttsState.error)
+    val readerSubtitle = if (ttsState.sessionActive && ttsState.sentenceCount > 0) {
+        stringResource(
+            R.string.tts_sentence_progress,
+            ttsState.sentenceIndex + 1,
+            ttsState.sentenceCount,
+        )
+    } else {
+        chapterTitle
+    }
 
     if (showSettings) {
         ReaderSettingsSheet(
@@ -188,6 +221,13 @@ internal fun MarkdownReaderScreen(
                             chapterSearchCurrent = current
                             chapterSearchCount = count
                         },
+                        onReadableTextChange = { text ->
+                            if (text != ttsText) {
+                                ttsText = text
+                            }
+                        },
+                        ttsHighlightStart = if (ttsState.sessionActive) ttsState.sentenceStart else -1,
+                        ttsHighlightEnd = if (ttsState.sessionActive) ttsState.sentenceEnd else -1,
                     )
                 }
             }
@@ -214,7 +254,7 @@ internal fun MarkdownReaderScreen(
             ) {
                 ReaderTopBar(
                     title = screen.document.title,
-                    subtitle = chapterTitle,
+                    subtitle = readerSubtitle,
                     onBack = onBack,
                     onSettings = { showSettings = true },
                     onSearch = { showChapterSearch = !showChapterSearch },
@@ -223,6 +263,17 @@ internal fun MarkdownReaderScreen(
                         onToggleBookmark(0, 1, scrollFraction, chapterTitle)
                     },
                     isBookmarked = currentBookmarked,
+                    onReadAloud = {
+                        ttsController.togglePlayback(scrollFraction)
+                    },
+                    readAloudActive = ttsState.sessionActive,
+                    readAloudPlaying = ttsState.isPlaying,
+                    readAloudCanPlay = ttsState.canPlay,
+                    readAloudPreviousEnabled = ttsState.sentenceIndex > 0,
+                    readAloudNextEnabled = ttsState.sentenceIndex < ttsState.sentenceCount - 1,
+                    onReadAloudPrevious = ttsController::previousSentence,
+                    onReadAloudNext = ttsController::nextSentence,
+                    onReadAloudStop = ttsController::dismiss,
                 )
             }
             Box(

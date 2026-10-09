@@ -4,6 +4,7 @@ import android.graphics.Color as AndroidColor
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.SystemClock
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -45,6 +47,9 @@ import app.areada.data.reader.ReadingBookmark
 import app.areada.data.reader.epubBookmarkId
 import app.areada.reader.epub.EpubEngine
 import app.areada.reader.epub.RenderedChapter
+import app.areada.reader.cast.BookCastServer
+import app.areada.reader.cast.DefaultBookCastPort
+import app.areada.reader.cast.EpubBookCastContent
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -139,6 +144,23 @@ internal fun EpubReaderScreen(
     var chapterError by remember(screen.document.uriString, chapterIndex) {
         mutableStateOf<String?>(null)
     }
+    var bookCastServer by remember(screen.document.uriString) {
+        mutableStateOf<BookCastServer?>(null)
+    }
+    val bookCastContent = remember(screen.document.uriString, screen.book) {
+        EpubBookCastContent(screen.document, screen.book)
+    }
+    val ttsController = rememberAndroidTtsController(screen.document.uriString)
+    val ttsState by ttsController.state.collectAsState()
+    var ttsAutoPlayNextChapter by remember(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var handledTtsCompletion by remember(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var ttsText by remember(screen.document.uriString, chapterIndex) {
+        mutableStateOf("")
+    }
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
     val sectionLabel = stringResource(R.string.section_count_label, chapterIndex + 1, screen.book.chapters.size)
     val topSubtitle = renderedChapter
@@ -178,11 +200,54 @@ internal fun EpubReaderScreen(
         )
     }
 
+    fun toggleBookCast() {
+        val activeServer = bookCastServer
+        if (activeServer != null) {
+            activeServer.close()
+            bookCastServer = null
+            Toast.makeText(
+                context,
+                context.getString(R.string.usb_book_cast_stopped),
+                Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+
+        val nextServer = BookCastServer(bookCastContent)
+        runCatching {
+            nextServer.start()
+        }.onSuccess { port ->
+            bookCastServer = nextServer
+            Toast.makeText(
+                context,
+                context.getString(
+                    R.string.usb_book_cast_started,
+                    port,
+                    nextServer.accessToken,
+                ),
+                Toast.LENGTH_LONG,
+            ).show()
+        }.onFailure { error ->
+            nextServer.close()
+            Toast.makeText(
+                context,
+                context.getString(
+                    R.string.usb_book_cast_failed,
+                    error.message ?: error.javaClass.simpleName,
+                ),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
     fun switchToChapter(nextIndex: Int) {
         if (nextIndex !in screen.book.chapters.indices || nextIndex == chapterIndex) {
             return
         }
 
+        if (ttsState.isPlaying) {
+            ttsController.pause()
+        }
         sectionScrollRequest = null
         sectionScrollable = false
         val targetFraction = if (nextIndex < chapterIndex && preferences.openPreviousChapterAtEnd) {
@@ -197,6 +262,38 @@ internal fun EpubReaderScreen(
         chapterSearchCurrent = 0
         chapterSearchCount = 0
         onSaveProgress(nextIndex, screen.book.chapters.size, targetFraction)
+    }
+
+    LaunchedEffect(preferences.languageMode, preferences.ttsSpeechRate) {
+        ttsController.configure(
+            nextLocale = preferences.languageMode.toSpeechLocale(),
+            nextSpeechRate = preferences.ttsSpeechRate,
+        )
+    }
+
+    LaunchedEffect(chapterIndex, ttsText) {
+        if (ttsText.isBlank()) {
+            return@LaunchedEffect
+        }
+        val autoPlay = ttsAutoPlayNextChapter
+        ttsAutoPlayNextChapter = false
+        ttsController.setContent(
+            contentKey = "${screen.document.uriString}#$chapterIndex",
+            text = ttsText,
+            startFraction = if (autoPlay) 0f else scrollFraction,
+            autoPlay = autoPlay,
+        )
+    }
+
+    LaunchedEffect(ttsState.completionCount) {
+        if (ttsState.completionCount <= handledTtsCompletion) {
+            return@LaunchedEffect
+        }
+        handledTtsCompletion = ttsState.completionCount
+        if (chapterIndex < screen.book.chapters.lastIndex) {
+            ttsAutoPlayNextChapter = true
+            switchToChapter(chapterIndex + 1)
+        }
     }
 
     val hapticFeedback = LocalHapticFeedback.current
@@ -254,6 +351,12 @@ internal fun EpubReaderScreen(
                 latestScrollFraction
             }
             onSaveProgress(latestChapterIndex, chapterCount, effectiveFraction)
+        }
+    }
+    DisposableEffect(bookCastServer) {
+        val activeServer = bookCastServer
+        onDispose {
+            activeServer?.close()
         }
     }
 
@@ -372,6 +475,22 @@ internal fun EpubReaderScreen(
     }
     val showReaderChrome = !isImmersiveMode || immersiveControlsVisible
     ReaderStatusBarHidden(hidden = !showReaderChrome)
+    ReaderTtsErrorEffect(ttsState.error)
+    val readerSubtitle = if (bookCastServer != null) {
+        stringResource(
+            R.string.usb_book_cast_active,
+            DefaultBookCastPort,
+            bookCastServer?.accessToken.orEmpty(),
+        )
+    } else if (ttsState.sessionActive && ttsState.sentenceCount > 0) {
+        stringResource(
+            R.string.tts_sentence_progress,
+            ttsState.sentenceIndex + 1,
+            ttsState.sentenceCount,
+        )
+    } else {
+        topSubtitle
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -441,6 +560,13 @@ internal fun EpubReaderScreen(
                                 chapterSearchCurrent = current
                                 chapterSearchCount = count
                             },
+                            onReadableTextChange = { text ->
+                                if (text != ttsText) {
+                                    ttsText = text
+                                }
+                            },
+                            ttsHighlightStart = if (ttsState.sessionActive) ttsState.sentenceStart else -1,
+                            ttsHighlightEnd = if (ttsState.sessionActive) ttsState.sentenceEnd else -1,
                         )
                     }
                 }
@@ -472,7 +598,7 @@ internal fun EpubReaderScreen(
                 ) {
                     ReaderTopBar(
                         title = screen.document.title,
-                        subtitle = topSubtitle,
+                        subtitle = readerSubtitle,
                         onBack = onBack,
                         onSettings = { showSettings = true },
                         onSearch = { showChapterSearch = !showChapterSearch },
@@ -486,6 +612,19 @@ internal fun EpubReaderScreen(
                             )
                         },
                         isBookmarked = currentBookmarked,
+                        onBookCast = ::toggleBookCast,
+                        bookCastActive = bookCastServer != null,
+                        onReadAloud = {
+                            ttsController.togglePlayback(scrollFraction)
+                        },
+                        readAloudActive = ttsState.sessionActive,
+                        readAloudPlaying = ttsState.isPlaying,
+                        readAloudCanPlay = ttsState.canPlay,
+                        readAloudPreviousEnabled = ttsState.sentenceIndex > 0,
+                        readAloudNextEnabled = ttsState.sentenceIndex < ttsState.sentenceCount - 1,
+                        onReadAloudPrevious = ttsController::previousSentence,
+                        onReadAloudNext = ttsController::nextSentence,
+                        onReadAloudStop = ttsController::dismiss,
                     )
                 }
                 Box(

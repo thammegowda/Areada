@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -128,6 +129,17 @@ internal fun Fb2ReaderScreen(
     var chapterError by remember(screen.document.uriString, chapterIndex) {
         mutableStateOf<String?>(null)
     }
+    val ttsController = rememberAndroidTtsController(screen.document.uriString)
+    val ttsState by ttsController.state.collectAsState()
+    var ttsAutoPlayNextChapter by remember(screen.document.uriString) {
+        mutableStateOf(false)
+    }
+    var handledTtsCompletion by remember(screen.document.uriString) {
+        mutableIntStateOf(0)
+    }
+    var ttsText by remember(screen.document.uriString, chapterIndex) {
+        mutableStateOf("")
+    }
     val renderPalette = rememberReaderRenderPalette(preferences.themeMode)
     val sectionLabel = stringResource(R.string.section_count_label, chapterIndex + 1, screen.book.chapters.size)
     val topSubtitle = renderedChapter
@@ -149,12 +161,47 @@ internal fun Fb2ReaderScreen(
 
     fun switchToChapter(nextIndex: Int) {
         if (nextIndex !in screen.book.chapters.indices || nextIndex == chapterIndex) return
+        if (ttsState.isPlaying) {
+            ttsController.pause()
+        }
         sectionScrollRequest = null
         sectionScrollable = false
         val targetFraction = if (nextIndex < chapterIndex && preferences.openPreviousChapterAtEnd) 1f else 0f
         scrollFraction = targetFraction
         chapterIndex = nextIndex
         onSaveProgress(nextIndex, screen.book.chapters.size, targetFraction)
+    }
+
+    LaunchedEffect(preferences.languageMode, preferences.ttsSpeechRate) {
+        ttsController.configure(
+            nextLocale = preferences.languageMode.toSpeechLocale(),
+            nextSpeechRate = preferences.ttsSpeechRate,
+        )
+    }
+
+    LaunchedEffect(chapterIndex, ttsText) {
+        if (ttsText.isBlank()) {
+            return@LaunchedEffect
+        }
+        val autoPlay = ttsAutoPlayNextChapter
+        ttsAutoPlayNextChapter = false
+        ttsController.setContent(
+            contentKey = "${screen.document.uriString}#$chapterIndex",
+            text = ttsText,
+            startFraction = if (autoPlay) 0f else scrollFraction,
+            autoPlay = autoPlay,
+        )
+    }
+
+    LaunchedEffect(ttsState.completionCount) {
+        if (ttsState.completionCount <= handledTtsCompletion) {
+            return@LaunchedEffect
+        }
+        handledTtsCompletion = ttsState.completionCount
+        if (chapterIndex < screen.book.chapters.lastIndex) {
+            ttsAutoPlayNextChapter = true
+            switchToChapter(chapterIndex + 1)
+        }
     }
 
     val hapticFeedback = LocalHapticFeedback.current
@@ -251,6 +298,16 @@ internal fun Fb2ReaderScreen(
     }
     val showReaderChrome = !isImmersiveMode || immersiveControlsVisible
     ReaderStatusBarHidden(hidden = !showReaderChrome)
+    ReaderTtsErrorEffect(ttsState.error)
+    val readerSubtitle = if (ttsState.sessionActive && ttsState.sentenceCount > 0) {
+        stringResource(
+            R.string.tts_sentence_progress,
+            ttsState.sentenceIndex + 1,
+            ttsState.sentenceCount,
+        )
+    } else {
+        topSubtitle
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -313,6 +370,13 @@ internal fun Fb2ReaderScreen(
                             searchRequest = 0,
                             searchBackwards = false,
                             onSearchResult = { _, _ -> },
+                            onReadableTextChange = { text ->
+                                if (text != ttsText) {
+                                    ttsText = text
+                                }
+                            },
+                            ttsHighlightStart = if (ttsState.sessionActive) ttsState.sentenceStart else -1,
+                            ttsHighlightEnd = if (ttsState.sessionActive) ttsState.sentenceEnd else -1,
                         )
                     }
                 }
@@ -344,7 +408,7 @@ internal fun Fb2ReaderScreen(
                 ) {
                     ReaderTopBar(
                         title = screen.document.title,
-                        subtitle = topSubtitle,
+                        subtitle = readerSubtitle,
                         onBack = onBack,
                         onSettings = { showSettings = true },
                         onSearch = {},
@@ -358,6 +422,17 @@ internal fun Fb2ReaderScreen(
                             )
                         },
                         isBookmarked = currentBookmarked,
+                        onReadAloud = {
+                            ttsController.togglePlayback(scrollFraction)
+                        },
+                        readAloudActive = ttsState.sessionActive,
+                        readAloudPlaying = ttsState.isPlaying,
+                        readAloudCanPlay = ttsState.canPlay,
+                        readAloudPreviousEnabled = ttsState.sentenceIndex > 0,
+                        readAloudNextEnabled = ttsState.sentenceIndex < ttsState.sentenceCount - 1,
+                        onReadAloudPrevious = ttsController::previousSentence,
+                        onReadAloudNext = ttsController::nextSentence,
+                        onReadAloudStop = ttsController::dismiss,
                     )
                 }
                 Box(

@@ -67,6 +67,7 @@ class ReaderPreferencesTest {
             ReaderPreferences(
                 fontSizeSp = 99,
                 lineSpacing = 9f,
+                ttsSpeechRate = 9f,
                 readingRuler = true,
                 readingRulerPosition = 2f,
             ),
@@ -74,8 +75,14 @@ class ReaderPreferencesTest {
 
         assertEquals(40, sanitized.fontSizeSp)
         assertEquals(2.4f, sanitized.lineSpacing, 0.0001f)
+        assertEquals(2f, sanitized.ttsSpeechRate, 0.0001f)
         assertEquals(true, sanitized.readingRuler)
         assertEquals(ReaderRulerPositionMax, sanitized.readingRulerPosition, 0.0001f)
+    }
+
+    @Test
+    fun ttsSpeechRateDefaultsToNormalSpeed() {
+        assertEquals(1f, ReaderPreferences().ttsSpeechRate, 0.0001f)
     }
 
     @Test

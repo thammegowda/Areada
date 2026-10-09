@@ -6,9 +6,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.Cast
+import androidx.compose.material.icons.outlined.CastConnected
 import androidx.compose.material.icons.automirrored.outlined.FormatListBulleted
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.RecordVoiceOver
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.SkipNext
+import androidx.compose.material.icons.outlined.SkipPrevious
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -37,6 +45,17 @@ internal fun ReaderTopBar(
     onTableOfContents: (() -> Unit)? = null,
     onBookmarkToggle: (() -> Unit)? = null,
     isBookmarked: Boolean = false,
+    onBookCast: (() -> Unit)? = null,
+    bookCastActive: Boolean = false,
+    onReadAloud: (() -> Unit)? = null,
+    readAloudActive: Boolean = false,
+    readAloudPlaying: Boolean = false,
+    readAloudCanPlay: Boolean = false,
+    readAloudPreviousEnabled: Boolean = false,
+    readAloudNextEnabled: Boolean = false,
+    onReadAloudPrevious: (() -> Unit)? = null,
+    onReadAloudNext: (() -> Unit)? = null,
+    onReadAloudStop: (() -> Unit)? = null,
 ) {
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
@@ -77,41 +96,110 @@ internal fun ReaderTopBar(
             }
         },
         actions = {
-            onSearch?.let { openSearch ->
-                IconButton(onClick = openSearch) {
+            onBookCast?.let { toggleBookCast ->
+                IconButton(onClick = toggleBookCast) {
                     Icon(
-                        imageVector = Icons.Outlined.Search,
-                        contentDescription = stringResource(R.string.search_current_chapter),
-                    )
-                }
-            }
-            onTableOfContents?.let { openToc ->
-                IconButton(onClick = openToc) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.FormatListBulleted,
-                        contentDescription = stringResource(R.string.table_of_contents),
-                    )
-                }
-            }
-            onBookmarkToggle?.let { toggleBookmark ->
-                IconButton(onClick = toggleBookmark) {
-                    Icon(
-                        imageVector = if (isBookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
-                        contentDescription = if (isBookmarked) {
-                            stringResource(R.string.remove_bookmark)
+                        imageVector = if (bookCastActive) {
+                            Icons.Outlined.CastConnected
                         } else {
-                            stringResource(R.string.add_bookmark)
+                            Icons.Outlined.Cast
                         },
-                        tint = if (isBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        contentDescription = if (bookCastActive) {
+                            stringResource(R.string.stop_usb_book_cast)
+                        } else {
+                            stringResource(R.string.start_usb_book_cast)
+                        },
+                        tint = if (bookCastActive) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
                     )
                 }
             }
-            onSettings?.let { openSettings ->
-                IconButton(onClick = openSettings) {
+            if (readAloudActive) {
+                IconButton(
+                    onClick = { onReadAloudPrevious?.invoke() },
+                    enabled = readAloudPreviousEnabled,
+                ) {
                     Icon(
-                        imageVector = Icons.Outlined.Settings,
-                        contentDescription = stringResource(R.string.settings),
+                        imageVector = Icons.Outlined.SkipPrevious,
+                        contentDescription = stringResource(R.string.previous_sentence),
                     )
+                }
+                IconButton(
+                    onClick = { onReadAloud?.invoke() },
+                    enabled = readAloudCanPlay,
+                ) {
+                    Icon(
+                        imageVector = if (readAloudPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                        contentDescription = if (readAloudPlaying) {
+                            stringResource(R.string.pause_read_aloud)
+                        } else {
+                            stringResource(R.string.resume_read_aloud)
+                        },
+                    )
+                }
+                IconButton(
+                    onClick = { onReadAloudNext?.invoke() },
+                    enabled = readAloudNextEnabled,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.SkipNext,
+                        contentDescription = stringResource(R.string.next_sentence),
+                    )
+                }
+                IconButton(onClick = { onReadAloudStop?.invoke() }) {
+                    Icon(
+                        imageVector = Icons.Outlined.Close,
+                        contentDescription = stringResource(R.string.stop_read_aloud),
+                    )
+                }
+            } else {
+                onReadAloud?.let { toggleReadAloud ->
+                    IconButton(onClick = toggleReadAloud) {
+                        Icon(
+                            imageVector = Icons.Outlined.RecordVoiceOver,
+                            contentDescription = stringResource(R.string.read_aloud),
+                        )
+                    }
+                }
+                onSearch?.let { openSearch ->
+                    IconButton(onClick = openSearch) {
+                        Icon(
+                            imageVector = Icons.Outlined.Search,
+                            contentDescription = stringResource(R.string.search_current_chapter),
+                        )
+                    }
+                }
+                onTableOfContents?.let { openToc ->
+                    IconButton(onClick = openToc) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Outlined.FormatListBulleted,
+                            contentDescription = stringResource(R.string.table_of_contents),
+                        )
+                    }
+                }
+                onBookmarkToggle?.let { toggleBookmark ->
+                    IconButton(onClick = toggleBookmark) {
+                        Icon(
+                            imageVector = if (isBookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder,
+                            contentDescription = if (isBookmarked) {
+                                stringResource(R.string.remove_bookmark)
+                            } else {
+                                stringResource(R.string.add_bookmark)
+                            },
+                            tint = if (isBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+                onSettings?.let { openSettings ->
+                    IconButton(onClick = openSettings) {
+                        Icon(
+                            imageVector = Icons.Outlined.Settings,
+                            contentDescription = stringResource(R.string.settings),
+                        )
+                    }
                 }
             }
         },

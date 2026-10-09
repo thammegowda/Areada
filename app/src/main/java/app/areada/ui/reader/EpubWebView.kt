@@ -51,6 +51,9 @@ internal fun EpubWebView(
     searchRequest: Int,
     searchBackwards: Boolean,
     onSearchResult: (current: Int, count: Int) -> Unit,
+    onReadableTextChange: (String) -> Unit = {},
+    ttsHighlightStart: Int = -1,
+    ttsHighlightEnd: Int = -1,
 ) {
     val backgroundColor = AndroidColor.parseColor(renderPalette.backgroundHex)
     val latestScrollRequest by rememberUpdatedState(scrollRequest)
@@ -64,6 +67,9 @@ internal fun EpubWebView(
     val latestOnOpenExternalLink by rememberUpdatedState(onOpenExternalLink)
     val latestOnOpenLocalHref by rememberUpdatedState(onOpenLocalHref)
     val latestOnSearchResult by rememberUpdatedState(onSearchResult)
+    val latestOnReadableTextChange by rememberUpdatedState(onReadableTextChange)
+    val latestTtsHighlightStart by rememberUpdatedState(ttsHighlightStart)
+    val latestTtsHighlightEnd by rememberUpdatedState(ttsHighlightEnd)
     val latestScrollEventId by rememberUpdatedState(scrollEventId)
     val latestScrollEventPixels by rememberUpdatedState(scrollEventPixels)
     val chapterSignature = "${chapter.baseUrl}#${chapter.html.hashCode()}"
@@ -135,6 +141,16 @@ internal fun EpubWebView(
                         view.postDelayed({ publishScrollState(force = true) }, 170L)
                         view.postDelayed({ publishScrollState(force = true) }, 360L)
                         injectNoteHandler(view)
+                        installEpubTtsTextIndex(
+                            webView = view,
+                            highlightColor = "${renderPalette.accentHex}55",
+                            onReadableText = latestOnReadableTextChange,
+                        )
+                        applyEpubTtsHighlight(
+                            webView = view,
+                            start = latestTtsHighlightStart,
+                            end = latestTtsHighlightEnd,
+                        )
                         applyEpubChapterSearch(
                             webView = view,
                             query = searchQuery,
@@ -284,6 +300,7 @@ internal fun EpubWebView(
         update = { webView ->
             if (webView.tag != chapterSignature) {
                 webView.tag = chapterSignature
+                webView.setTag(R.id.tag_epub_tts_highlight, null)
                 webView.loadDataWithBaseURL(
                     chapter.baseUrl,
                     chapter.html,
@@ -315,6 +332,11 @@ internal fun EpubWebView(
                 request = searchRequest,
                 backwards = searchBackwards,
                 onSearchResult = onSearchResult,
+            )
+            applyEpubTtsHighlight(
+                webView = webView,
+                start = ttsHighlightStart,
+                end = ttsHighlightEnd,
             )
         },
         onRelease = { webView ->

@@ -36,6 +36,8 @@ data class EpubBook(
     val extractedRoot: File,
     val chapters: List<EpubChapter>,
     val archiveFile: File? = null,
+    val author: String? = null,
+    val language: String = "und",
 )
 
 data class EpubChapter(
@@ -142,6 +144,19 @@ object EpubEngine {
                         ?.trim()
                         ?.ifBlank { null }
                         ?: fallbackTitle
+                    val author = packageDocument
+                        .getElementsByTagNameNS("*", "creator")
+                        .item(0)
+                        ?.textContent
+                        ?.trim()
+                        ?.ifBlank { null }
+                    val language = packageDocument
+                        .getElementsByTagNameNS("*", "language")
+                        .item(0)
+                        ?.textContent
+                        ?.trim()
+                        ?.ifBlank { null }
+                        ?: "und"
 
                     readyMarker.writeText("ready")
                     val now = System.currentTimeMillis()
@@ -153,6 +168,8 @@ object EpubEngine {
                         extractedRoot = root,
                         chapters = chapters,
                         archiveFile = archiveFile,
+                        author = author,
+                        language = language,
                     )
                 }
             } catch (throwable: Throwable) {
@@ -854,4 +871,3 @@ object EpubEngine {
         val properties: String,
     )
 }
-
