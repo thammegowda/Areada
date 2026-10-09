@@ -9,7 +9,6 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -453,38 +452,11 @@ internal class AndroidTtsController(context: Context) {
 
     private fun configureOfflineVoice(): Boolean {
         val engine = textToSpeech ?: return false
-        val matchingVoice = engine.voices
-            .orEmpty()
-            .asSequence()
-            .filterNot(Voice::isNetworkConnectionRequired)
-            .filter { voice ->
-                voice.locale.toLanguageTag().equals(locale.toLanguageTag(), ignoreCase = true) ||
-                    voice.locale.language.equals(locale.language, ignoreCase = true)
-            }
-            .sortedWith(
-                compareByDescending<Voice> { voice -> voice.quality }
-                    .thenBy { voice -> voice.latency },
-            )
-            .firstOrNull()
-
-        if (matchingVoice != null) {
-            engine.voice = matchingVoice
-            engine.setSpeechRate(speechRate)
+        if (configureOfflineTtsVoice(engine, locale, speechRate)) {
             return true
         }
-
-        val languageResult = engine.setLanguage(locale)
-        val currentVoice = engine.voice
-        if (
-            languageResult < TextToSpeech.LANG_AVAILABLE ||
-            currentVoice?.isNetworkConnectionRequired == true
-        ) {
-            setError(ReaderTtsError.NO_OFFLINE_VOICE)
-            return false
-        }
-
-        engine.setSpeechRate(speechRate)
-        return true
+        setError(ReaderTtsError.NO_OFFLINE_VOICE)
+        return false
     }
 
     private fun stopSynthesis(keepPosition: Boolean) {

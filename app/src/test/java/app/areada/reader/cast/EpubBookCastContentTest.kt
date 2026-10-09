@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
 
 class EpubBookCastContentTest {
     @Test
@@ -45,5 +46,30 @@ class EpubBookCastContentTest {
 
         assertEquals("Cover", body.selectFirst("h1")?.text())
         assertTrue(body.text().contains("no readable text"))
+    }
+
+    @Test
+    fun groupsSentencesIntoParagraphAlignedNarrationChunks() {
+        val html = """
+            <p>First paragraph contains enough words for a useful spoken passage.</p>
+            <p>Second paragraph continues the same thought with a little more detail.</p>
+            <p>Third paragraph starts a new grouped narration passage for playback.</p>
+            <p>Fourth paragraph finishes the sample with stable global text offsets.</p>
+        """.trimIndent()
+        val text = Jsoup.parseBodyFragment(html).body().text()
+        val chunks = buildBookCastNarrationChunks(
+            sanitizedHtml = html,
+            readableText = text,
+            locale = Locale.US,
+            targetCharacters = 100,
+            maxCharacters = 180,
+        )
+
+        assertEquals(2, chunks.size)
+        assertTrue(chunks.all { chunk -> chunk.text.length <= 180 })
+        chunks.forEach { chunk ->
+            assertEquals(chunk.text, text.substring(chunk.start, chunk.end))
+        }
+        assertEquals(text, chunks.joinToString(" ") { chunk -> chunk.text })
     }
 }

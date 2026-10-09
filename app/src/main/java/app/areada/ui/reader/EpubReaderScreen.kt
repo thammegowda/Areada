@@ -47,6 +47,7 @@ import app.areada.data.reader.ReadingBookmark
 import app.areada.data.reader.epubBookmarkId
 import app.areada.reader.epub.EpubEngine
 import app.areada.reader.epub.RenderedChapter
+import app.areada.reader.cast.AndroidBookCastTtsRenderer
 import app.areada.reader.cast.BookCastServer
 import app.areada.reader.cast.DefaultBookCastPort
 import app.areada.reader.cast.EpubBookCastContent
@@ -213,7 +214,10 @@ internal fun EpubReaderScreen(
             return
         }
 
-        val nextServer = BookCastServer(bookCastContent)
+        val nextServer = BookCastServer(
+            content = bookCastContent,
+            audioRenderer = AndroidBookCastTtsRenderer(context),
+        )
         runCatching {
             nextServer.start()
         }.onSuccess { port ->

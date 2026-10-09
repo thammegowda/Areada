@@ -27,6 +27,44 @@ internal data class BookCastChapter(
     val title: String,
 )
 
+internal data class BookCastNarrationChunk(
+    val text: String,
+    val start: Int,
+    val end: Int,
+)
+
+internal data class BookCastNarration(
+    val language: String,
+    val chunks: List<BookCastNarrationChunk>,
+)
+
+internal data class BookCastAudio(
+    val bytes: ByteArray,
+    val contentType: String,
+    val durationMillis: Long,
+    val spans: List<BookCastAudioSpan>,
+)
+
+internal data class BookCastAudioSpan(
+    val start: Int,
+    val end: Int,
+    val startMillis: Long,
+    val endMillis: Long,
+)
+
+internal interface BookCastAudioRenderer : Closeable {
+    fun synthesize(
+        text: String,
+        language: String,
+        speechRate: Float,
+    ): BookCastAudio
+}
+
+internal class BookCastAudioException(
+    message: String,
+    cause: Throwable? = null,
+) : Exception(message, cause)
+
 internal interface BookCastContent {
     val bookId: String
     val title: String
@@ -34,12 +72,17 @@ internal interface BookCastContent {
     val format: String
     val language: String
     val chapters: List<BookCastChapter>
+    val narrationAvailable: Boolean
+        get() = false
 
     fun loadChapterHtml(chapterId: String): String?
+
+    fun loadChapterNarration(chapterId: String): BookCastNarration? = null
 }
 
 internal class BookCastServer(
     private val content: BookCastContent,
+    private val audioRenderer: BookCastAudioRenderer? = null,
     private val requestedPort: Int = DefaultBookCastPort,
     val accessToken: String = generateAccessToken(),
 ) : Closeable {
@@ -114,6 +157,10 @@ internal class BookCastServer(
         }
         clientSockets.clear()
         executor?.shutdownNow()
+        runCatching { audioRenderer?.close() }
+            .onFailure { error ->
+                logger.log(Level.WARNING, "Unable to close book cast audio renderer", error)
+            }
     }
 
     private fun acceptRequests(
@@ -196,7 +243,7 @@ internal class BookCastServer(
         }
         if (
             request.path != "/v1/health" &&
-            !tokensMatch(request.accessToken, accessToken)
+            !tokensMatch(request.queryParameters["token"], accessToken)
         ) {
             return response(
                 401,
@@ -231,12 +278,17 @@ internal class BookCastServer(
                 "image/svg+xml; charset=utf-8",
                 coverSvg(),
             )
-            else -> chapterResponse(request.path) ?: response(
-                404,
-                "Not Found",
-                "text/plain; charset=utf-8",
-                "Not found",
-            )
+            else ->
+                narrationResponse(request.path)
+                    ?: alignmentResponse(request)
+                    ?: audioResponse(request)
+                    ?: chapterResponse(request.path)
+                    ?: response(
+                        404,
+                        "Not Found",
+                        "text/plain; charset=utf-8",
+                        "Not found",
+                    )
         }
     }
 
@@ -252,6 +304,250 @@ internal class BookCastServer(
         val html = content.loadChapterHtml(chapterId)
             ?: return response(404, "Not Found", "text/plain; charset=utf-8", "Chapter not found")
         return response(200, "OK", "text/html; charset=utf-8", html)
+    }
+
+    private fun narrationResponse(path: String): HttpResponse? {
+        val prefix = "/v1/books/${content.bookId}/narration/"
+        if (!path.startsWith(prefix) || !path.endsWith(".json")) {
+            return null
+        }
+        val chapterId = path.removePrefix(prefix).removeSuffix(".json")
+        if (content.chapters.none { chapter -> chapter.id == chapterId }) {
+            return response(404, "Not Found", "text/plain; charset=utf-8", "Chapter not found")
+        }
+        val narration = content.loadChapterNarration(chapterId)
+            ?: return response(
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                "Narration is unavailable",
+            )
+        return response(
+            200,
+            "OK",
+            "application/json; charset=utf-8",
+            narrationJson(chapterId, narration),
+        )
+    }
+
+    private fun audioResponse(request: HttpRequest): HttpResponse? {
+        val prefix = "/v1/books/${content.bookId}/audio/"
+        if (!request.path.startsWith(prefix) || !request.path.endsWith(".wav")) {
+            return null
+        }
+        val route = parseChunkRoute(request.path, prefix, ".wav")
+            ?: return response(404, "Not Found", "text/plain; charset=utf-8", "Audio not found")
+        val resolved = resolveNarrationChunk(route)
+            ?: return response(404, "Not Found", "text/plain; charset=utf-8", "Narration chunk not found")
+        val speechRate = speechRate(request)
+            ?: return response(
+                400,
+                "Bad Request",
+                "text/plain; charset=utf-8",
+                "Speech rate must be between $MinSpeechRate and $MaxSpeechRate",
+            )
+        if (audioRenderer == null) {
+            return response(
+                501,
+                "Not Implemented",
+                "text/plain; charset=utf-8",
+                "Audio narration is unavailable",
+            )
+        }
+        val audio = synthesizeNarrationAudio(
+            narration = resolved.narration,
+            chunk = resolved.chunk,
+            speechRate = speechRate,
+        ) ?: return response(
+            503,
+            "Service Unavailable",
+            "text/plain; charset=utf-8",
+            "Unable to synthesize narration",
+        )
+        return rangedAudioResponse(
+            audio = audio,
+            rangeHeader = request.headers["range"],
+        )
+    }
+
+    private fun alignmentResponse(request: HttpRequest): HttpResponse? {
+        val prefix = "/v1/books/${content.bookId}/alignment/"
+        if (!request.path.startsWith(prefix) || !request.path.endsWith(".json")) {
+            return null
+        }
+        val route = parseChunkRoute(request.path, prefix, ".json")
+            ?: return response(
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                "Alignment not found",
+            )
+        val resolved = resolveNarrationChunk(route)
+            ?: return response(
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                "Narration chunk not found",
+            )
+        val speechRate = speechRate(request)
+            ?: return response(
+                400,
+                "Bad Request",
+                "text/plain; charset=utf-8",
+                "Speech rate must be between $MinSpeechRate and $MaxSpeechRate",
+            )
+        if (audioRenderer == null) {
+            return response(
+                501,
+                "Not Implemented",
+                "text/plain; charset=utf-8",
+                "Audio narration is unavailable",
+            )
+        }
+        val audio = synthesizeNarrationAudio(
+            narration = resolved.narration,
+            chunk = resolved.chunk,
+            speechRate = speechRate,
+        ) ?: return response(
+            503,
+            "Service Unavailable",
+            "text/plain; charset=utf-8",
+            "Unable to synthesize narration",
+        )
+        return response(
+            statusCode = 200,
+            reason = "OK",
+            contentType = "application/json; charset=utf-8",
+            body = alignmentJson(
+                chapterId = route.chapterId,
+                chunkIndex = route.chunkIndex,
+                chunk = resolved.chunk,
+                audio = audio,
+            ),
+        )
+    }
+
+    private fun parseChunkRoute(
+        path: String,
+        prefix: String,
+        suffix: String,
+    ): BookCastChunkRoute? {
+        val parts = path
+            .removePrefix(prefix)
+            .removeSuffix(suffix)
+            .split('/')
+        if (parts.size != 2) {
+            return null
+        }
+        val chunkIndex = parts[1].toIntOrNull() ?: return null
+        return BookCastChunkRoute(
+            chapterId = parts[0],
+            chunkIndex = chunkIndex,
+        )
+    }
+
+    private fun resolveNarrationChunk(
+        route: BookCastChunkRoute,
+    ): ResolvedNarrationChunk? {
+        val narration = content.loadChapterNarration(route.chapterId) ?: return null
+        val chunk = narration.chunks.getOrNull(route.chunkIndex) ?: return null
+        return ResolvedNarrationChunk(
+            narration = narration,
+            chunk = chunk,
+        )
+    }
+
+    private fun speechRate(request: HttpRequest): Float? {
+        val speechRate = request.queryParameters["rate"]
+            ?.toFloatOrNull()
+            ?: DefaultSpeechRate
+        return speechRate.takeIf { rate -> rate in MinSpeechRate..MaxSpeechRate }
+    }
+
+    private fun synthesizeNarrationAudio(
+        narration: BookCastNarration,
+        chunk: BookCastNarrationChunk,
+        speechRate: Float,
+    ): BookCastAudio? {
+        val renderer = audioRenderer ?: return null
+        return try {
+            renderer.synthesize(
+                text = chunk.text,
+                language = narration.language,
+                speechRate = speechRate,
+            )
+        } catch (error: BookCastAudioException) {
+            logger.log(Level.WARNING, "Unable to synthesize book cast audio", error)
+            null
+        }
+    }
+
+    private fun alignmentJson(
+        chapterId: String,
+        chunkIndex: Int,
+        chunk: BookCastNarrationChunk,
+        audio: BookCastAudio,
+    ): String {
+        val spans = audio.spans.joinToString(",\n") { span ->
+            """
+            {
+              "start": ${chunk.start + span.start},
+              "end": ${chunk.start + span.end},
+              "startMs": ${span.startMillis},
+              "endMs": ${span.endMillis}
+            }
+            """.trimIndent().prependIndent("    ")
+        }
+        return """
+            {
+              "chapterId": ${jsonString(chapterId)},
+              "chunkIndex": $chunkIndex,
+              "durationMs": ${audio.durationMillis},
+              "spans": [
+            $spans
+              ]
+            }
+        """.trimIndent()
+    }
+
+    private fun rangedAudioResponse(
+        audio: BookCastAudio,
+        rangeHeader: String?,
+    ): HttpResponse {
+        val totalBytes = audio.bytes.size
+        val baseHeaders = mapOf("Accept-Ranges" to "bytes")
+        if (rangeHeader.isNullOrBlank()) {
+            return binaryResponse(
+                statusCode = 200,
+                reason = "OK",
+                contentType = audio.contentType,
+                body = audio.bytes,
+                extraHeaders = baseHeaders,
+            )
+        }
+
+        val range = parseByteRange(rangeHeader, totalBytes)
+            ?: return binaryResponse(
+                statusCode = 416,
+                reason = "Range Not Satisfiable",
+                contentType = "text/plain; charset=utf-8",
+                body = "Requested audio range is invalid".toByteArray(
+                    StandardCharsets.UTF_8,
+                ),
+                extraHeaders = baseHeaders + (
+                    "Content-Range" to "bytes */$totalBytes"
+                    ),
+            )
+        return binaryResponse(
+            statusCode = 206,
+            reason = "Partial Content",
+            contentType = audio.contentType,
+            body = audio.bytes.copyOfRange(range.first, range.last + 1),
+            extraHeaders = baseHeaders + (
+                "Content-Range" to
+                    "bytes ${range.first}-${range.last}/$totalBytes"
+                ),
+        )
     }
 
     private fun catalogJson(): String =
@@ -273,11 +569,18 @@ internal class BookCastServer(
 
     private fun manifestJson(): String {
         val chapters = content.chapters.joinToString(",\n") { chapter ->
+            val narrationField = if (content.narrationAvailable) {
+                ",\n" +
+                    "  \"narration\": " +
+                    jsonString("narration/${chapter.id}.json?token=$accessToken")
+            } else {
+                ""
+            }
             """
             {
               "id": ${jsonString(chapter.id)},
               "title": ${jsonString(chapter.title)},
-              "href": ${jsonString("chapters/${chapter.id}.html?token=$accessToken")}
+              "href": ${jsonString("chapters/${chapter.id}.html?token=$accessToken")}$narrationField
             }
             """.trimIndent().prependIndent("    ")
         }
@@ -289,6 +592,33 @@ internal class BookCastServer(
               "language": ${jsonString(content.language)},
               "chapters": [
             $chapters
+              ]
+            }
+        """.trimIndent()
+    }
+
+    private fun narrationJson(
+        chapterId: String,
+        narration: BookCastNarration,
+    ): String {
+        val chunks = narration.chunks.mapIndexed { index, chunk ->
+            """
+            {
+              "index": $index,
+              "text": ${jsonString(chunk.text)},
+              "start": ${chunk.start},
+              "end": ${chunk.end},
+              "audio": ${jsonString("audio/$chapterId/$index.wav?token=$accessToken")},
+              "alignment": ${jsonString("alignment/$chapterId/$index.json?token=$accessToken")}
+            }
+            """.trimIndent().prependIndent("    ")
+        }.joinToString(",\n")
+        return """
+            {
+              "chapterId": ${jsonString(chapterId)},
+              "language": ${jsonString(narration.language)},
+              "chunks": [
+            $chunks
               ]
             }
         """.trimIndent()
@@ -321,6 +651,7 @@ internal class BookCastServer(
         }
 
         var headerCount = 0
+        val headers = linkedMapOf<String, String>()
         while (true) {
             val line = readHttpLine(reader)
                 ?: throw BadRequestException("Incomplete request headers")
@@ -331,6 +662,12 @@ internal class BookCastServer(
             if (headerCount > MaxHeaderCount) {
                 throw BadRequestException("Request headers are too large")
             }
+            val separator = line.indexOf(':')
+            if (separator <= 0) {
+                throw BadRequestException("Invalid request header")
+            }
+            headers[line.substring(0, separator).trim().lowercase()] =
+                line.substring(separator + 1).trim()
         }
 
         val target = runCatching { URI(parts[1]) }
@@ -341,7 +678,8 @@ internal class BookCastServer(
         return HttpRequest(
             method = parts[0].uppercase(),
             path = path,
-            accessToken = queryParameter(target.rawQuery, "token"),
+            queryParameters = queryParameters(target.rawQuery),
+            headers = headers,
         )
     }
 
@@ -349,7 +687,7 @@ internal class BookCastServer(
         socket: Socket,
         response: HttpResponse,
     ) {
-        val body = response.body.toByteArray(StandardCharsets.UTF_8)
+        val body = response.body
         val headerText = buildString {
             append("HTTP/1.1 ${response.statusCode} ${response.reason}\r\n")
             append("Content-Type: ${response.contentType}\r\n")
@@ -357,7 +695,8 @@ internal class BookCastServer(
             append("Cache-Control: no-store\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
             append("Access-Control-Allow-Methods: GET, OPTIONS\r\n")
-            append("Access-Control-Allow-Headers: Content-Type\r\n")
+            append("Access-Control-Allow-Headers: Content-Type, Range\r\n")
+            append("Access-Control-Expose-Headers: Accept-Ranges, Content-Range\r\n")
             append("Connection: close\r\n")
             response.extraHeaders.forEach { (name, value) ->
                 append("$name: $value\r\n")
@@ -378,6 +717,20 @@ internal class BookCastServer(
         contentType: String,
         body: String,
         extraHeaders: Map<String, String> = emptyMap(),
+    ): HttpResponse = binaryResponse(
+        statusCode = statusCode,
+        reason = reason,
+        contentType = contentType,
+        body = body.toByteArray(StandardCharsets.UTF_8),
+        extraHeaders = extraHeaders,
+    )
+
+    private fun binaryResponse(
+        statusCode: Int,
+        reason: String,
+        contentType: String,
+        body: ByteArray,
+        extraHeaders: Map<String, String> = emptyMap(),
     ): HttpResponse = HttpResponse(
         statusCode = statusCode,
         reason = reason,
@@ -390,14 +743,25 @@ internal class BookCastServer(
 private data class HttpRequest(
     val method: String,
     val path: String,
-    val accessToken: String?,
+    val queryParameters: Map<String, String>,
+    val headers: Map<String, String>,
+)
+
+private data class BookCastChunkRoute(
+    val chapterId: String,
+    val chunkIndex: Int,
+)
+
+private data class ResolvedNarrationChunk(
+    val narration: BookCastNarration,
+    val chunk: BookCastNarrationChunk,
 )
 
 private data class HttpResponse(
     val statusCode: Int,
     val reason: String,
     val contentType: String,
-    val body: String,
+    val body: ByteArray,
     val extraHeaders: Map<String, String>,
 )
 
@@ -470,16 +834,17 @@ private fun xmlText(value: String): String =
         .replace("\"", "&quot;")
         .replace("'", "&apos;")
 
-private fun queryParameter(
-    rawQuery: String?,
-    name: String,
-): String? =
+private fun queryParameters(rawQuery: String?): Map<String, String> =
     rawQuery
         ?.split('&')
-        ?.asSequence()
-        ?.map { parameter -> parameter.split('=', limit = 2) }
-        ?.firstOrNull { parts -> parts.firstOrNull() == name }
-        ?.getOrNull(1)
+        ?.mapNotNull { parameter ->
+            val parts = parameter.split('=', limit = 2)
+            val name = parts.firstOrNull()?.takeIf(String::isNotBlank)
+                ?: return@mapNotNull null
+            name to parts.getOrElse(1) { "" }
+        }
+        ?.toMap()
+        .orEmpty()
 
 private fun tokensMatch(
     candidate: String?,
@@ -494,6 +859,49 @@ private fun tokensMatch(
     )
 }
 
+private fun parseByteRange(
+    header: String,
+    totalBytes: Int,
+): IntRange? {
+    if (totalBytes <= 0) {
+        return null
+    }
+    val match = ByteRangeRegex.matchEntire(header.trim()) ?: return null
+    val startText = match.groupValues[1]
+    val endText = match.groupValues[2]
+    if (startText.isEmpty() && endText.isEmpty()) {
+        return null
+    }
+
+    val start: Int
+    val end: Int
+    if (startText.isEmpty()) {
+        val suffixLength = endText.toLongOrNull()
+            ?.takeIf { length -> length > 0L }
+            ?: return null
+        start = (totalBytes - suffixLength.coerceAtMost(totalBytes.toLong()))
+            .toInt()
+        end = totalBytes - 1
+    } else {
+        val parsedStart = startText.toLongOrNull()
+            ?.takeIf { value -> value in 0 until totalBytes.toLong() }
+            ?: return null
+        start = parsedStart.toInt()
+        end = if (endText.isEmpty()) {
+            totalBytes - 1
+        } else {
+            endText.toLongOrNull()
+                ?.coerceAtMost((totalBytes - 1).toLong())
+                ?.toInt()
+                ?: return null
+        }
+        if (end < start) {
+            return null
+        }
+    }
+    return start..end
+}
+
 private fun generateAccessToken(): String {
     val bytes = ByteArray(8)
     SecureRandom().nextBytes(bytes)
@@ -502,8 +910,12 @@ private fun generateAccessToken(): String {
 
 private val SafeIdentifier = Regex("^[a-z0-9]+(?:-[a-z0-9]+)*$")
 private val SafeAccessToken = Regex("^[a-zA-Z0-9_-]{12,128}$")
+private val ByteRangeRegex = Regex("""bytes=(\d*)-(\d*)""")
 private const val RequestBacklog = 8
 private const val MaxClientThreads = 4
 private const val SocketReadTimeoutMillis = 5_000
 private const val MaxLineLength = 8_192
 private const val MaxHeaderCount = 100
+private const val DefaultSpeechRate = 1f
+private const val MinSpeechRate = 0.5f
+private const val MaxSpeechRate = 2f

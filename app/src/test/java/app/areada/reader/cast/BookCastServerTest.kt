@@ -22,6 +22,7 @@ class BookCastServerTest {
                 override val author = "Test Author"
                 override val format = "EPUB"
                 override val language = "en"
+                override val narrationAvailable = true
                 override val chapters = listOf(
                     BookCastChapter("chapter-1", "One"),
                     BookCastChapter("chapter-2", "Two"),
@@ -33,6 +34,44 @@ class BookCastServerTest {
                         "chapter-2" -> "<h1>Two</h1><p>Another chapter.</p>"
                         else -> null
                     }
+
+                override fun loadChapterNarration(chapterId: String): BookCastNarration? =
+                    if (chapterId == "chapter-1") {
+                        BookCastNarration(
+                            language = "en-US",
+                            chunks = listOf(
+                                BookCastNarrationChunk(
+                                    text = "Hello from Android.",
+                                    start = 10,
+                                    end = 29,
+                                ),
+                            ),
+                        )
+                    } else {
+                        null
+                    }
+            },
+            audioRenderer = object : BookCastAudioRenderer {
+                override fun synthesize(
+                    text: String,
+                    language: String,
+                    speechRate: Float,
+                ): BookCastAudio =
+                    BookCastAudio(
+                        bytes = "RIFF-test-audio".toByteArray(),
+                        contentType = "audio/wav",
+                        durationMillis = 1_000,
+                        spans = listOf(
+                            BookCastAudioSpan(
+                                start = 0,
+                                end = 5,
+                                startMillis = 0,
+                                endMillis = 400,
+                            ),
+                        ),
+                    )
+
+                override fun close() = Unit
             },
             requestedPort = 0,
             accessToken = accessToken,
@@ -50,6 +89,21 @@ class BookCastServerTest {
         val catalog = request("/v1/catalog.json")
         val manifest = request("/v1/books/test-book/manifest.json")
         val chapter = request("/v1/books/test-book/chapters/chapter-1.html")
+        val narration = request("/v1/books/test-book/narration/chapter-1.json")
+        val alignment = request("/v1/books/test-book/alignment/chapter-1/0.json")
+        val audio = request("/v1/books/test-book/audio/chapter-1/0.wav")
+        val audioRange = request(
+            "/v1/books/test-book/audio/chapter-1/0.wav",
+            rangeHeader = "bytes=5-8",
+        )
+        val audioSuffix = request(
+            "/v1/books/test-book/audio/chapter-1/0.wav",
+            rangeHeader = "bytes=-4",
+        )
+        val invalidRange = request(
+            "/v1/books/test-book/audio/chapter-1/0.wav",
+            rangeHeader = "bytes=99-100",
+        )
 
         assertEquals(200, catalog.status)
         assertTrue(catalog.body.contains("Quoted \\\"Title\\\""))
@@ -60,8 +114,26 @@ class BookCastServerTest {
                 "\"href\": \"chapters/chapter-2.html?token=$accessToken\"",
             ),
         )
+        assertTrue(
+            manifest.body.contains(
+                "\"narration\": \"narration/chapter-1.json?token=$accessToken\"",
+            ),
+        )
         assertEquals(200, chapter.status)
         assertTrue(chapter.body.contains("Hello from Android"))
+        assertEquals(200, narration.status)
+        assertTrue(narration.body.contains("\"chunks\""))
+        assertEquals(200, alignment.status)
+        assertTrue(alignment.body.contains("\"start\": 10"))
+        assertEquals(200, audio.status)
+        assertEquals("audio/wav", audio.contentType)
+        assertEquals(206, audioRange.status)
+        assertEquals("test", audioRange.body)
+        assertEquals("bytes 5-8/15", audioRange.contentRange)
+        assertEquals(206, audioSuffix.status)
+        assertEquals("udio", audioSuffix.body)
+        assertEquals(416, invalidRange.status)
+        assertEquals("bytes */15", invalidRange.contentRange)
     }
 
     @Test
@@ -75,6 +147,7 @@ class BookCastServerTest {
         path: String,
         method: String = "GET",
         authorized: Boolean = true,
+        rangeHeader: String? = null,
     ): TestResponse {
         val separator = if ('?' in path) '&' else '?'
         val requestPath = if (authorized && path != "/v1/health") {
@@ -85,6 +158,9 @@ class BookCastServerTest {
         val connection = URL("http://127.0.0.1:$port$requestPath")
             .openConnection() as HttpURLConnection
         connection.requestMethod = method
+        rangeHeader?.let { value ->
+            connection.setRequestProperty("Range", value)
+        }
         connection.connectTimeout = 2_000
         connection.readTimeout = 2_000
         val status = connection.responseCode
@@ -94,6 +170,8 @@ class BookCastServerTest {
             status = status,
             body = body,
             cors = connection.getHeaderField("Access-Control-Allow-Origin"),
+            contentType = connection.contentType,
+            contentRange = connection.getHeaderField("Content-Range"),
         ).also {
             connection.disconnect()
         }
@@ -104,4 +182,6 @@ private data class TestResponse(
     val status: Int,
     val body: String,
     val cors: String?,
+    val contentType: String?,
+    val contentRange: String?,
 )

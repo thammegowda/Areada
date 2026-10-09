@@ -86,7 +86,7 @@ A compatible browser reader can then load:
 http://127.0.0.1:8787/v1/catalog.json?token=ACCESS_CODE
 ```
 
-The server exposes only the currently open EPUB, accepts requests only through the device loopback interface, and stops when casting is disabled or the EPUB reader closes.
+The server exposes only the currently open EPUB, accepts requests only through the device loopback interface, and stops when casting is disabled or the EPUB reader closes. Narration is synthesized lazily into cached, paragraph-sized WAV chunks. Companion readers can use the accompanying word-range timing metadata and HTTP byte ranges to highlight text and seek narration when the visible page changes.
 
 ## Privacy
 
